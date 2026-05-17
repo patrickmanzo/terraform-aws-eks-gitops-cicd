@@ -1,0 +1,169 @@
+pipeline {
+  agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-kaniko
+spec:
+  serviceAccountName: jenkins-sa
+  containers:
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:v1.16.0-debug
+    imagePullPolicy: Always
+    command:
+    - sleep
+    args:
+    - 99d
+  - name: git
+    image: alpine/git
+    command: ["cat"]
+    tty: true
+"""
+    }
+  }
+
+  parameters {
+    string(name: 'ECR_REGISTRY', defaultValue: '343104031682.dkr.ecr.us-east-1.amazonaws.com', description: 'ECR Registry Endpoint')
+    string(name: 'ECR_REPOSITORY_NAME', defaultValue: 'finance-app', description: 'ECR Repository Name')
+    string(name: 'GITHUB_REPO_URL', defaultValue: 'https://github.com/patrickmanzo/terraform-aws-eks-gitops-cicd.git', description: 'GitHub Repository URL')
+  }
+
+  environment {
+    // ECR Configuration from Parameters
+    ECR_REGISTRY = "${params.ECR_REGISTRY}"
+    IMAGE_NAME   = "${params.ECR_REPOSITORY_NAME}"
+    IMAGE_TAG    = "v1.0.${BUILD_NUMBER}"
+
+    // Git Configuration
+    COMMIT_EMAIL = "jenkins@localhost"
+    COMMIT_NAME  = "jenkins"
+
+    // GitHub Repository URL from Parameters
+    GITHUB_REPO = "${params.GITHUB_REPO_URL}"
+  }
+
+  stages {
+
+    stage('Debug Environment Variables') {
+      steps {
+        script {
+          echo "=== Parameters and Environment Variables Debug ==="
+          echo "params.ECR_REGISTRY: ${params.ECR_REGISTRY}"
+          echo "params.ECR_REPOSITORY_NAME: ${params.ECR_REPOSITORY_NAME}"
+          echo "params.GITHUB_REPO_URL: ${params.GITHUB_REPO_URL}"
+          echo "Final ECR_REGISTRY: ${ECR_REGISTRY}"
+          echo "Final IMAGE_NAME: ${IMAGE_NAME}"
+          echo "Final GITHUB_REPO: ${GITHUB_REPO}"
+          echo "IMAGE_TAG: ${IMAGE_TAG}"
+          echo "Destination will be: ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "================================================="
+        }
+      }
+    }
+
+    stage('Build & Push Docker Image') {
+      steps {
+        container('kaniko') {
+          dir('django') {
+            sh 'ls -l Dockerfile'
+
+            sh '''
+              /kaniko/executor \
+                --context=. \
+                --dockerfile=Dockerfile \
+                --destination=$ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG \
+                --insecure \
+                --skip-tls-verify
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Update Chart Tag in Git') {
+      steps {
+        container('git') {
+          withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PAT')]) {
+            sh '''
+              # Configure git with credentials first
+              git config --global user.email "${COMMIT_EMAIL}"
+              git config --global user.name "${COMMIT_NAME}"
+
+              # Debug: Check if credentials are available
+              echo "Username: ${GIT_USERNAME}"
+              echo "Token length: $(echo ${GIT_PAT} | wc -c)"
+
+              # Install curl if not present (for GitHub API calls)
+              if ! command -v curl &> /dev/null; then
+                echo "curl could not be found, installing..."
+                apk add --no-cache curl
+              fi
+
+              # Clone with embedded authentication using dynamic repository URL
+              git clone "https://${GIT_USERNAME}:${GIT_PAT}@$(echo ${GITHUB_REPO} | sed 's|https://||')" terra-micro-project
+              cd terra-micro-project
+
+              echo "Obtaining commit hash..."
+              GIT_HASH=$(git rev-parse --short HEAD)
+              TEMP_BRANCH="ci-${GIT_HASH}"
+              echo "Creating temporary branch: ${TEMP_BRANCH}"
+
+              git checkout -b ${TEMP_BRANCH} || { echo "Failed to create branch ${TEMP_BRANCH}"; exit 1; }
+
+              cd charts/django-app
+
+              # Before the change
+              cat values.yaml | grep tag:
+
+              # Update the image tag
+              sed -i "s/tag: .*/tag: ${IMAGE_TAG}/" values.yaml
+
+              echo "After commit:"
+              grep tag: values.yaml
+
+              git add values.yaml
+              git commit -m "Update image tag to ${IMAGE_TAG} [${TEMP_BRANCH}]" || echo "No changes to commit"
+
+              echo "Push branch ${TEMP_BRANCH}..."
+              git push "https://${GIT_USERNAME}:${GIT_PAT}@$(echo ${GITHUB_REPO} | sed 's|https://||')" ${TEMP_BRANCH}
+
+              # Extract repository owner and name from GITHUB_REPO URL
+              REPO_OWNER=$(echo ${GITHUB_REPO} | sed 's|https://github.com/||' | cut -d'/' -f1)
+              REPO_NAME=$(echo ${GITHUB_REPO} | sed 's|https://github.com/||' | cut -d'/' -f2 | sed 's|\\.git$||')
+
+              EXISTING_PR=$(curl -s -H "Authorization: token ${GIT_PAT}" \\
+                https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls \\
+                | grep "\\"head\\": {\\"label\\": \\"${GIT_USERNAME}:${TEMP_BRANCH}\\"}" || true)
+
+              if [ -z "$EXISTING_PR" ]; then
+                echo "Creating Pull Request via GitHub API..."
+
+                PR_TITLE="Update image tag to ${IMAGE_TAG}"
+                PR_BODY="This PR updates the image tag to '${IMAGE_TAG}' automatically generated by the pipeline."
+                BASE_BRANCH="main"
+
+                curl -s -X POST -H "Authorization: token ${GIT_PAT}" \\
+                  -H "Content-Type: application/json" \\
+                  -d '{
+                    "title": "'"${PR_TITLE}"'",
+                    "body": "'"${PR_BODY}"'",
+                    "head": "'"${TEMP_BRANCH}"'",
+                    "base": "'"${BASE_BRANCH}"'"
+                  }' \\
+                https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls
+              else
+                echo "PR already exists for branch ${TEMP_BRANCH}, skipping creation."
+              fi
+
+              echo "Process completed."
+            '''
+          }
+        }
+      }
+    }
+
+  }
+}

@@ -1,0 +1,58 @@
+{{- range .Values.applications }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .name }}
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: {{ .name }}
+    app.kubernetes.io/instance: argo-cd-apps
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    # Add annotations for better deletion handling
+    argocd.argoproj.io/refresh: "hard"
+    # Force cascade deletion to ensure all managed resources are cleaned up
+    argocd.argoproj.io/cascade: "foreground"
+    # Disable finalizers to speed up deletion
+    argocd.argoproj.io/finalizer: "resources-finalizer.argocd.argoproj.io"
+spec:
+  project: {{ .project }}
+  source:
+    repoURL: {{ .source.repoURL }}
+    path: {{ .source.path }}
+    targetRevision: {{ .source.targetRevision }}
+    helm:
+      valueFiles:
+      {{- range .source.helm.valueFiles }}
+        - {{ . | quote }}
+      {{- end }}
+      {{- if .source.helm.parameters }}
+      parameters:
+      {{- range .source.helm.parameters }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+      {{- end }}
+      {{- end }}
+  destination:
+    server: {{ .destination.server }}
+    namespace: {{ .destination.namespace }}
+  syncPolicy:
+    automated:
+      prune: {{ .syncPolicy.automated.prune }}
+      selfHeal: {{ .syncPolicy.automated.selfHeal }}
+    {{- if .syncPolicy.syncOptions }}
+    syncOptions:
+    {{- range .syncPolicy.syncOptions }}
+      - {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- if .syncPolicy.retry }}
+    retry:
+      limit: {{ .syncPolicy.retry.limit | default 5 }}
+      backoff:
+        duration: {{ .syncPolicy.retry.backoff.duration | default "5s" }}
+        factor: {{ .syncPolicy.retry.backoff.factor | default 2 }}
+        maxDuration: {{ .syncPolicy.retry.backoff.maxDuration | default "3m" }}
+    {{- end }}
+---
+{{- end }}

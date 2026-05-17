@@ -1,0 +1,41 @@
+repos:
+  # Terraform hooks
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.99.4
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+        args:
+          - --hook-config=--retry-once-with-cleanup=true
+        # Skip modules that need helm provider (requires full init)
+        exclude: 'modules/argo_cd/|modules/jenkins/|modules/aws_load_balancer_controller/|modules/monitoring/'
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+      - id: terraform_docs
+        args:
+          - --args=--config=.terraform-docs.yml
+      - id: terraform_trivy
+        args:
+          - --args=--severity=CRITICAL,HIGH
+          - --args=--exit-code=0
+          # Exit code 0 = warn only, don't block commits (lab environment)
+
+  # General hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents, --unsafe]
+        exclude: '^charts/.*\.yaml$|^modules/.*/charts/.*\.yaml$'
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # Helm chart validation
+  - repo: https://github.com/gruntwork-io/pre-commit
+    rev: v0.1.23
+    hooks:
+      - id: helmlint

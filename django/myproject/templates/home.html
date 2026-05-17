@@ -1,0 +1,174 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Django Application</title>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="{% static 'images/favicon.svg' %}">
+    <link rel="icon" type="image/x-icon" href="{% static 'favicon.ico' %}">
+    <link rel="apple-touch-icon" href="{% static 'images/apple-touch-icon.svg' %}">
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="{% static 'manifest.json' %}">
+
+    <!-- Meta tags for better app appearance -->
+    <meta name="theme-color" content="#667eea">
+    <meta name="description" content="Django Application - Production Ready Container Platform">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .logo {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #2c3e50;
+        }
+        .title {
+            font-size: 2.5rem;
+            color: #2c3e50;
+            margin-bottom: 1rem;
+            font-weight: 300;
+        }
+        .subtitle {
+            font-size: 1.2rem;
+            color: #7f8c8d;
+            margin-bottom: 2rem;
+        }
+        .status {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            background: #27ae60;
+            color: white;
+            border-radius: 25px;
+            font-weight: 500;
+            margin-bottom: 2rem;
+        }
+        .endpoints {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+        .endpoint {
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #3498db;
+            text-decoration: none;
+            color: #2c3e50;
+            transition: all 0.3s ease;
+        }
+        .endpoint:hover {
+            background: #e9ecef;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .endpoint-title {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        .endpoint-desc {
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+        .health-status {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .health-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .health-item:last-child {
+            border-bottom: none;
+        }
+        .status-ok {
+            color: #27ae60;
+            font-weight: 600;
+        }
+        .footer {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #dee2e6;
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🚀</div>
+        <h1 class="title">Django Application</h1>
+        <p class="subtitle">Welcome to your Django application running on Kubernetes!</p>
+
+        <div class="status">✅ Application Running</div>
+
+        <div class="endpoints">
+            <a href="/health" class="endpoint">
+                <div class="endpoint-title">Health Check</div>
+                <div class="endpoint-desc">Detailed health status with database connectivity</div>
+            </a>
+
+            <a href="/ready" class="endpoint">
+                <div class="endpoint-title">Readiness</div>
+                <div class="endpoint-desc">Check if application is ready to serve requests</div>
+            </a>
+
+            <a href="/alive" class="endpoint">
+                <div class="endpoint-title">Liveness</div>
+                <div class="endpoint-desc">Basic application liveness check</div>
+            </a>
+
+            <a href="/admin" class="endpoint">
+                <div class="endpoint-title">Admin Panel</div>
+                <div class="endpoint-desc">Django administration interface</div>
+            </a>
+        </div>
+
+        <div class="health-status">
+            <h3>System Status</h3>
+            <div class="health-item">
+                <span>Database Connection</span>
+                <span class="status-ok">Connected</span>
+            </div>
+            <div class="health-item">
+                <span>Application Server</span>
+                <span class="status-ok">Running</span>
+            </div>
+            <div class="health-item">
+                <span>Environment</span>
+                <span class="status-ok">{{ environment }}</span>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Django {{ django_version }} • Python • Docker • Kubernetes Ready</p>
+            <p>Infrastructure provisioned with Terraform • Deployed with ArgoCD</p>
+        </div>
+    </div>
+</body>
+</html>

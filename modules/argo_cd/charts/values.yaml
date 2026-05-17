@@ -1,0 +1,44 @@
+applications:
+  - name: django-app   # name of the application in Argo CD
+    namespace: django  # Kubernetes namespace
+    project: default    # name of the Argo CD project
+    source:             # source of the application code
+      # repoURL: https://github.com/YOUR_USERNAME/example-repo.git
+      repoURL: ${github_repo_url}  # Git repository URL where the Helm chart or Kubernetes manifests are stored
+      path: charts/django-app      # path inside the repo to the required chart or YAML files
+      targetRevision: ${github_branch}   # Git branch or tag to deploy from (e.g., main)
+      helm:
+        valueFiles:                # list of YAML files with settings passed to the Helm chart
+          - values.yaml
+        parameters:
+          - name: namespace
+            value: django
+    destination:                               # where to deploy the application
+      server: https://kubernetes.default.svc   # address of the Kubernetes API server; for internal clusters, use https://kubernetes.default.svc
+      namespace: django                        # Target namespace for the Django app
+    syncPolicy:            # sync policy
+      automated:           # enables automatic application of changes
+        prune: true        # delete resources no longer defined in Git
+        selfHeal: true     # automatically fix drift from Git state if something is changed manually in the cluster
+      syncOptions:
+        - CreateNamespace=true  # This will create the namespace if it doesn't exist
+        - PrunePropagationPolicy=foreground  # Ensure proper deletion order
+        - PruneLast=true     # Prune resources after all other operations
+      # Add retry policy for better handling of deletions
+      retry:
+        limit: 5
+        backoff:
+          duration: 5s
+          factor: 2
+          maxDuration: 3m
+
+repositories:
+  - name: django-app           # name of the repository for internal reference
+    # url: https://github.com/YOUR_USERNAME/example-repo.git
+    url: ${github_repo_url}     # full URL of the Git repository
+    username: ${github_user}    # credentials for accessing the private repository
+    password: ${github_pat}
+
+repoConfig:
+  insecure: "true"    # allow repository access without SSL certificate verification; not recommended for production
+  enableLfs: "true"   # enable Git LFS (Large File Storage) support if the repository contains large files

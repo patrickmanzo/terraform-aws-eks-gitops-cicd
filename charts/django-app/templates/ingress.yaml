@@ -1,0 +1,67 @@
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-ingress
+  namespace: {{ .Values.namespace | default "django" }}
+  labels:
+    app: {{ .Release.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: {{ .Chart.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    # Finalizer configuration - allows faster deletion without waiting for AWS cleanup
+    alb.ingress.kubernetes.io/actions.remove-finalizer: '{"Type": "remove-finalizer"}'
+    alb.ingress.kubernetes.io/finalizers: ""
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/load-balancer-name: "{{ .Release.Name }}-alb"
+    alb.ingress.kubernetes.io/group.name: "{{ .Release.Name }}"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health/
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/inbound-cidrs: 0.0.0.0/0
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      idle_timeout.timeout_seconds=60,
+      deletion_protection.enabled=false,
+      routing.http2.enabled=true
+    alb.ingress.kubernetes.io/tags: |
+      Environment={{ .Values.namespace }},
+      Application={{ .Chart.Name }},
+      Version={{ .Values.image.tag }}
+spec:
+  ingressClassName: alb
+  rules:
+  {{- if .Values.ingress.host }}
+  - host: {{ .Values.ingress.host | quote }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Release.Name }}
+            port:
+              number: {{ .Values.service.port }}
+  {{- else }}
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Release.Name }}
+            port:
+              number: {{ .Values.service.port }}
+  {{- end }}
+{{- end }}

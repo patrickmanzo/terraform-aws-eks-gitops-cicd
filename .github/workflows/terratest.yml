@@ -1,0 +1,178 @@
+name: Terratest
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.tf'
+      - 'test/**'
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of tests to run'
+        required: true
+        default: 'fast'
+        type: choice
+        options:
+          - fast      # Plan-only tests (no AWS resources)
+          - full      # Full tests (creates real AWS resources)
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Fast tests - run on every PR (no AWS resources created)
+  fast-tests:
+    name: Fast Tests (Plan Only)
+    runs-on: ubuntu-latest
+    env:
+      # GitHub Variables (same as main terraform workflow)
+      TF_VAR_github_pat: ${{ secrets.TF_GITHUB_PAT }}
+      TF_VAR_github_repo_url: ${{ secrets.TF_GITHUB_REPO_URL }}
+      TF_VAR_github_user: ${{ secrets.TF_GITHUB_USER }}
+      TF_VAR_github_branch: ${{ secrets.TF_GITHUB_BRANCH }}
+
+      # AWS Variables
+      TF_VAR_region: ${{ secrets.TF_REGION }}
+      AWS_DEFAULT_REGION: ${{ secrets.TF_REGION }}
+
+      # RDS Variables
+      TF_VAR_rds_password: ${{ secrets.TF_RDS_PASSWORD }}
+      TF_VAR_rds_publicly_accessible: ${{ secrets.TF_RDS_PUBLIC }}
+
+      # Project Variables
+      TF_VAR_name: "finance-app"
+      TF_VAR_rds_use_aurora: "false"
+      TF_VAR_rds_instance_class: "db.t3.micro"
+      TF_VAR_rds_database_name: "financedb"
+      TF_VAR_rds_username: "postgres"
+      TF_VAR_rds_multi_az: "false"
+      TF_VAR_rds_backup_retention_period: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: false  # Disable cache since go.sum may not exist
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.TF_REGION }}
+
+      - name: Download Go modules
+        working-directory: test
+        run: |
+          if [ -f go.mod ]; then
+            echo "✅ Found go.mod, downloading modules..."
+            go mod download
+          else
+            echo "⚠️ No go.mod found, initializing..."
+            go mod init github.com/patrickmanzo/terra-micro-project/test
+            go get github.com/gruntwork-io/terratest/modules/terraform
+            go get github.com/stretchr/testify/assert
+            go mod tidy
+          fi
+
+      - name: Run Terraform Validate Test
+        working-directory: test
+        run: go test -v -run TestTerraformValidate -timeout 10m
+
+      - name: Run VPC Plan Test
+        working-directory: test
+        run: go test -v -run TestVPCModuleOutputs -timeout 10m
+
+      - name: Run EKS Plan Test
+        working-directory: test
+        run: go test -v -run TestEKSModulePlan -timeout 10m
+
+  # Full tests - only on manual trigger (creates real AWS resources)
+  full-tests:
+    name: Full Tests (Real Resources)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.test_type == 'full'
+    env:
+      # GitHub Variables (same as main terraform workflow)
+      TF_VAR_github_pat: ${{ secrets.TF_GITHUB_PAT }}
+      TF_VAR_github_repo_url: ${{ secrets.TF_GITHUB_REPO_URL }}
+      TF_VAR_github_user: ${{ secrets.TF_GITHUB_USER }}
+      TF_VAR_github_branch: ${{ secrets.TF_GITHUB_BRANCH }}
+
+      # AWS Variables
+      TF_VAR_region: ${{ secrets.TF_REGION }}
+      AWS_DEFAULT_REGION: ${{ secrets.TF_REGION }}
+
+      # RDS Variables
+      TF_VAR_rds_password: ${{ secrets.TF_RDS_PASSWORD }}
+      TF_VAR_rds_publicly_accessible: ${{ secrets.TF_RDS_PUBLIC }}
+
+      # Project Variables
+      TF_VAR_name: "finance-app"
+      TF_VAR_rds_use_aurora: "false"
+      TF_VAR_rds_instance_class: "db.t3.micro"
+      TF_VAR_rds_database_name: "financedb"
+      TF_VAR_rds_username: "postgres"
+      TF_VAR_rds_multi_az: "false"
+      TF_VAR_rds_backup_retention_period: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: false  # Disable cache since go.sum may not exist
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.TF_REGION }}
+
+      - name: Download Go modules
+        working-directory: test
+        run: |
+          if [ -f go.mod ]; then
+            echo "✅ Found go.mod, downloading modules..."
+            go mod download
+          else
+            echo "⚠️ No go.mod found, initializing..."
+            go mod init github.com/patrickmanzo/terra-micro-project/test
+            go get github.com/gruntwork-io/terratest/modules/terraform
+            go get github.com/stretchr/testify/assert
+            go mod tidy
+          fi
+
+      - name: Run VPC Integration Test
+        working-directory: test
+        run: go test -v -run TestVPCModule -timeout 30m
+
+      # EKS test is expensive and slow - uncomment if needed
+      # - name: Run EKS Integration Test
+      #   working-directory: test
+      #   run: go test -v -run TestEKSClusterMinimal -timeout 45m

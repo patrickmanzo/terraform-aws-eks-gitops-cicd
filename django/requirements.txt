@@ -1,0 +1,17 @@
+Django==4.2
+psycopg2-binary>=2.9.9
+dj-database-url
+gunicorn>=20.1.0
+whitenoise>=6.0.0
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-django>=4.5.0
+pytest-cov>=4.0.0
+pytest-xdist>=3.0.0
+pytest-html>=3.0.0
+factory-boy>=3.2.0
+bandit>=1.7.0
+black>=22.0.0
+flake8>=5.0.0
+safety>=2.0.0

@@ -1,0 +1,1222 @@
+name: 'Terraform'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'apply'
+        type: choice
+        options:
+        - apply
+        - destroy
+      deployment_mode:
+        description: 'Deployment mode (which modules to deploy)'
+        required: true
+        default: 'testing'
+        type: choice
+        options:
+        - testing
+        - minimal
+        - full
+        - default
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    env:
+      # GitHub Variables
+      TF_VAR_github_pat: ${{ secrets.TF_GITHUB_PAT }}
+      TF_VAR_github_repo_url: ${{ secrets.TF_GITHUB_REPO_URL }}
+      TF_VAR_github_user: ${{ secrets.TF_GITHUB_USER }}
+      TF_VAR_github_branch: ${{ secrets.TF_GITHUB_BRANCH }}
+
+      # AWS Variables
+      TF_VAR_region: ${{ secrets.TF_REGION }}
+
+      # RDS Variables
+      TF_VAR_rds_password: ${{ secrets.TF_RDS_PASSWORD }}
+      TF_VAR_rds_publicly_accessible: ${{ secrets.TF_RDS_PUBLIC }}
+
+      # Kubernetes Configuration - helps with destroy operations
+      KUBE_CONFIG_PATH: ~/.kube/config
+
+      # Project Variables (you can add these as secrets or keep as defaults)
+      TF_VAR_name: "finance-app"
+      TF_VAR_rds_use_aurora: "false"
+      TF_VAR_rds_instance_class: "db.t3.micro"
+      TF_VAR_rds_database_name: "financedb"
+      TF_VAR_rds_username: "postgres"
+      TF_VAR_rds_multi_az: "false"
+      TF_VAR_rds_backup_retention_period: "0"
+      TF_VAR_rds_aurora_engine: "aurora-postgresql"
+      TF_VAR_rds_aurora_engine_version: "17.5"
+      TF_VAR_rds_aurora_parameter_group_family: "aurora-postgresql17"
+      TF_VAR_rds_instance_engine: "postgres"
+      TF_VAR_rds_instance_engine_version: "17.6"
+      TF_VAR_rds_instance_parameter_group_family: "postgres17"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.TF_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -upgrade
+
+      - name: Terraform Format Check
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        id: fmt
+        run: |
+          echo "🔍 Checking Terraform formatting..."
+          if terraform fmt -check -recursive; then
+            echo "✅ All files are properly formatted"
+            echo "formatted=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Some files need formatting"
+            echo "formatted=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "📋 Files that need formatting:"
+            terraform fmt -recursive -diff
+            echo ""
+            echo "💡 Run 'terraform fmt -recursive' locally to fix"
+            # Fail on PR, continue on push/apply
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              exit 1
+            fi
+          fi
+        continue-on-error: ${{ github.event_name != 'pull_request' }}
+
+      - name: Terraform Validate
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        run: terraform validate
+
+      # ══════════════════════════════════════════════════════════════════════════════
+      # VALIDATION & SECURITY CHECKS (skip on destroy)
+      # ══════════════════════════════════════════════════════════════════════════════
+
+      - name: Setup TFLint
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+          github_token: ${{ secrets.GITHUB_TOKEN }}  # Avoid rate limiting
+        continue-on-error: true
+
+      - name: TFLint - Validate Configuration
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        id: tflint
+        run: |
+          echo "🔍 Running TFLint validation..."
+          if command -v tflint &> /dev/null; then
+            tflint --init || echo "⚠️ TFLint init failed (rate limit?), skipping..."
+            tflint --format=compact --recursive || true
+            echo "✅ TFLint validation completed"
+          else
+            echo "⚠️ TFLint not available, skipping..."
+          fi
+        continue-on-error: true
+
+      - name: Setup TFSec
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        run: |
+          echo "🔒 Installing tfsec..."
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash > /dev/null 2>&1 || echo "⚠️ TFSec install failed, skipping..."
+        continue-on-error: true
+
+      - name: TFSec - Security Scan
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        id: tfsec
+        run: |
+          echo "🔒 Running TFSec security scan..."
+          if command -v tfsec &> /dev/null; then
+            tfsec . --format=lovely || true
+            echo "✅ TFSec security scan completed"
+          else
+            echo "⚠️ TFSec not available, skipping..."
+          fi
+        continue-on-error: true
+
+      # ══════════════════════════════════════════════════════════════════════════════
+      # COST ESTIMATE & INFRASTRUCTURE MAP (skip on destroy)
+      # ══════════════════════════════════════════════════════════════════════════════
+
+      - name: Setup Infracost
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+        continue-on-error: true
+
+      - name: Infracost - Cost Estimate
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        run: |
+          # Check if infracost is available
+          if ! command -v infracost &> /dev/null; then
+            echo "⚠️ Infracost not available - skipping cost estimate"
+            exit 0
+          fi
+
+          echo "💰 Generating cost estimate..."
+
+          # For PRs, generate diff against base branch
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "📊 Generating cost diff for PR..."
+            git fetch origin ${{ github.base_ref }} --depth=1
+            git checkout ${{ github.base_ref }} -- . 2>/dev/null || true
+            terraform init -backend=false -upgrade
+            infracost breakdown --path=. --format=json --out-file=/tmp/infracost-base.json --terraform-var-file=testing.tfvars 2>/dev/null || true
+
+            git checkout ${{ github.head_ref }} -- . 2>/dev/null || git checkout - -- .
+            terraform init -backend=false -upgrade
+
+            infracost diff --path=. --format=json --compare-to=/tmp/infracost-base.json --out-file=/tmp/infracost-diff.json --terraform-var-file=testing.tfvars || true
+
+            infracost comment github --path=/tmp/infracost-diff.json \
+              --repo=$GITHUB_REPOSITORY \
+              --github-token=${{ github.token }} \
+              --pull-request=${{ github.event.pull_request.number }} \
+              --behavior=update || true
+          else
+            # For push/apply, just show breakdown
+            echo "📊 Generating cost breakdown..."
+            infracost breakdown --path=. --terraform-var-file=testing.tfvars --format=table || echo "⚠️ Cost estimate failed - continuing anyway"
+          fi
+        continue-on-error: true
+
+      - name: Install Graphviz
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq graphviz > /dev/null 2>&1
+        continue-on-error: true
+
+      - name: Generate Infrastructure Map
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        run: |
+          echo "🗺️ Generating infrastructure map using terraform graph..."
+
+          # Use terraform graph (shows all modules and resources)
+          terraform graph -type=plan 2>/dev/null | dot -Tpng -o infrastructure-map.png 2>/dev/null || true
+          terraform graph -type=plan 2>/dev/null | dot -Tsvg -o infrastructure-map.svg 2>/dev/null || true
+
+          if [ -f infrastructure-map.png ] && [ -s infrastructure-map.png ]; then
+            echo "✅ Infrastructure map generated"
+            ls -la infrastructure-map.*
+          else
+            echo "⚠️ Could not generate infrastructure map, trying alternative..."
+            # Fallback: simple module list
+            echo "digraph G {" > modules.dot
+            echo "  rankdir=TB;" >> modules.dot
+            echo "  node [shape=box];" >> modules.dot
+            for module in $(grep -r "^module " *.tf modules.tf 2>/dev/null | awk '{print $2}' | tr -d '"' | sort -u); do
+              echo "  \"$module\";" >> modules.dot
+            done
+            echo "}" >> modules.dot
+            dot -Tpng modules.dot -o infrastructure-map.png 2>/dev/null || true
+          fi
+        continue-on-error: true
+
+      - name: Upload Infrastructure Map
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-map
+          path: |
+            infrastructure-map.png
+            infrastructure-map.svg
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Comment Infrastructure Map on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const mapExists = fs.existsSync('infrastructure-map.png');
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+
+            let body = '## 🗺️ Infrastructure Map\n\n';
+            if (mapExists) {
+              body += `✅ Infrastructure diagram generated successfully!\n\n`;
+              body += `📥 **[Download from workflow artifacts](${runUrl})**\n\n`;
+              body += `> The diagram shows the dependency graph of all Terraform resources and modules.`;
+            } else {
+              body += `⚠️ Could not generate infrastructure map.`;
+            }
+
+            // Find and update existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c => c.body.includes('## 🗺️ Infrastructure Map'));
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+        continue-on-error: true
+
+      - name: Terraform Plan (PR)
+        if: github.event_name == 'pull_request'
+        id: plan
+        run: |
+          echo "📊 Generating Terraform plan for PR..."
+          # Disable kubernetes resources during PR plan since CI runner doesn't have cluster access
+          # This prevents the Kubernetes provider from trying to connect to the cluster
+          terraform plan -var-file=testing.tfvars -var="enable_kubernetes_resources=false" -no-color -out=tfplan 2>&1 | tee plan_output.txt
+
+          # Save plan output for comment
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          cat plan_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Comment Terraform Plan (PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.existsSync('plan_output.txt')
+              ? fs.readFileSync('plan_output.txt', 'utf8')
+              : 'Plan output not available';
+
+            // Truncate if too long (GitHub comment limit is 65536 chars)
+            const maxLength = 60000;
+            let truncatedPlan = planOutput;
+            if (planOutput.length > maxLength) {
+              truncatedPlan = planOutput.substring(0, maxLength) + '\n\n... (truncated, see workflow logs for full output)';
+            }
+
+            const planStatus = '${{ steps.plan.outcome }}' === 'success' ? '✅' : '⚠️';
+
+            const body = `## 📋 Terraform Plan ${planStatus}
+
+            <details>
+            <summary>Click to expand plan output</summary>
+
+            \`\`\`hcl
+            ${truncatedPlan}
+            \`\`\`
+
+            </details>
+
+            > 💡 Review the plan carefully before approving this PR.
+            > 🔗 [View full workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes('## 📋 Terraform Plan'));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
+            }
+        continue-on-error: true
+
+      # ══════════════════════════════════════════════════════════════════════════════
+      # APPLY WORKFLOW (push to main or manual apply)
+      # ══════════════════════════════════════════════════════════════════════════════
+
+      # Check if EKS cluster exists and setup kubeconfig if it does
+      - name: Setup kubeconfig for existing cluster
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo "Checking if EKS cluster exists..."
+          if aws eks describe-cluster --name dev-finance-eks-cluster --region ${{ secrets.TF_REGION }} &>/dev/null; then
+            echo "EKS cluster exists, setting up kubeconfig..."
+            aws eks update-kubeconfig --region ${{ secrets.TF_REGION }} --name dev-finance-eks-cluster
+            kubectl get nodes || echo "Cluster exists but nodes may not be ready yet"
+            echo "KUBE_CONFIG_PATH=$HOME/.kube/config" >> $GITHUB_ENV
+            echo "CLUSTER_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "EKS cluster does not exist, will be created in this run"
+            echo "CLUSTER_EXISTS=false" >> $GITHUB_ENV
+          fi
+        continue-on-error: true
+
+      # Select deployment configuration
+      - name: Select Deployment Configuration
+        if: github.event_name != 'pull_request'
+        id: config
+        run: |
+          # For manual workflow dispatch, use the selected mode
+          # For automatic pushes, default to testing mode
+          DEPLOYMENT_MODE="${{ github.event.inputs.deployment_mode }}"
+
+          # If deployment mode is empty (push event), default to testing
+          if [[ -z "$DEPLOYMENT_MODE" ]]; then
+            DEPLOYMENT_MODE="testing"
+            echo "ℹ️ Auto-push detected - defaulting to TESTING mode"
+          fi
+
+          echo "🔍 Selected deployment mode: $DEPLOYMENT_MODE"
+
+          # Set tfvars file based on mode
+          if [[ "$DEPLOYMENT_MODE" == "testing" ]]; then
+            TFVARS_FILE="testing.tfvars"
+            echo "📋 Using TESTING configuration (VPC, EKS, Monitoring, ArgoCD, Jenkins, RDS)"
+          elif [[ "$DEPLOYMENT_MODE" == "minimal" ]]; then
+            TFVARS_FILE="minimal.tfvars"
+            echo "📋 Using MINIMAL configuration (VPC, EKS, ECR only)"
+          elif [[ "$DEPLOYMENT_MODE" == "full" ]]; then
+            TFVARS_FILE="full-deployment.tfvars"
+            echo "📋 Using FULL configuration (all modules enabled)"
+          else
+            TFVARS_FILE="terraform.tfvars"
+            echo "📋 Using DEFAULT configuration"
+          fi
+
+          # Set as environment variable for subsequent steps
+          echo "tfvars_file=$TFVARS_FILE" >> $GITHUB_OUTPUT
+          echo "TFVARS_FILE=$TFVARS_FILE" >> $GITHUB_ENV
+
+          # Verify file exists
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "✅ File exists: $TFVARS_FILE"
+          else
+            echo "❌ WARNING: File not found: $TFVARS_FILE"
+            echo "📁 Available tfvars files:"
+            ls -la *.tfvars || true
+          fi
+
+      # Debug step to verify tfvars selection
+      - name: Debug tfvars Selection
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🔍 TFVARS DEBUG INFORMATION"
+          echo "════════════════════════════════════════"
+          echo "Event: ${{ github.event_name }}"
+          echo "Deployment Mode Input: ${{ github.event.inputs.deployment_mode }}"
+          echo "Selected tfvars (from env): $TFVARS_FILE"
+          echo ""
+          echo "File exists check:"
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "✅ File exists: $TFVARS_FILE"
+            echo ""
+            echo "📄 Enable flags in this file:"
+            grep "enable_" "$TFVARS_FILE" | head -15
+          else
+            echo "❌ File NOT found: $TFVARS_FILE"
+            echo ""
+            echo "Available .tfvars files:"
+            ls -la *.tfvars
+          fi
+          echo "════════════════════════════════════════"
+
+      # Apply workflow (default for pushes)
+      - name: Terraform Plan (Apply)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo "🔍 DEBUG: Using tfvars file from environment"
+          echo "TFVARS_FILE = $TFVARS_FILE"
+
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "📋 Using configuration file: $TFVARS_FILE"
+            echo "🔍 File contents (enable flags only):"
+            grep "enable_" "$TFVARS_FILE" || echo "No enable flags found"
+
+            echo ""
+            echo "📊 Running terraform plan with -var-file=$TFVARS_FILE"
+            terraform plan -var-file="$TFVARS_FILE" -out=tfplan
+          else
+            echo "❌ ERROR: tfvars file not found: $TFVARS_FILE"
+            echo "📋 Available tfvars files:"
+            ls -la *.tfvars || true
+            echo "⚠️ Falling back to default configuration (Jenkins and RDS will NOT be enabled!)"
+            terraform plan -out=tfplan
+          fi
+
+      - name: Terraform Apply Infrastructure (Phase 1)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo "🚀 Phase 1: Applying infrastructure components (VPC, EKS, ECR, RDS, S3, Bastion)..."
+
+          echo "🔍 DEBUG: Using tfvars file: $TFVARS_FILE"
+
+          # Phase 1: Deploy ONLY AWS infrastructure using -target flags
+          # This prevents destroying existing Kubernetes resources
+          echo "📊 Step 1: Deploying AWS infrastructure (EKS cluster, VPC, etc.)..."
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "✅ Using -var-file=$TFVARS_FILE"
+            # Use -target to only apply AWS infrastructure modules (not k8s resources)
+            terraform apply -auto-approve -var-file="$TFVARS_FILE" \
+              -target=module.vpc \
+              -target=module.eks \
+              -target=module.ecr \
+              -target=module.rds \
+              -target=module.s3 \
+              -target=module.bastion \
+              -target=aws_sns_topic.billing_alerts \
+              -target=aws_sns_topic_subscription.email \
+              -target=aws_cloudwatch_metric_alarm.billing_alarm
+          else
+            echo "❌ ERROR: No valid tfvars file - using defaults!"
+            echo "⚠️ WARNING: Jenkins and RDS will NOT be deployed!"
+            terraform apply -auto-approve \
+              -target=module.vpc \
+              -target=module.eks \
+              -target=module.ecr \
+              -target=module.rds \
+              -target=module.s3 \
+              -target=module.bastion
+          fi
+
+          echo "✅ Phase 1 complete - AWS infrastructure deployed"
+
+      - name: Wait for EKS Cluster to be Ready (New Cluster Only)
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')) && env.CLUSTER_EXISTS == 'false'
+        run: |
+          echo "Waiting for newly created EKS cluster to be fully ready..."
+          sleep 30
+          aws eks wait cluster-active --name dev-finance-eks-cluster --region ${{ secrets.TF_REGION }}
+
+      # Update kubeconfig after EKS cluster is deployed (for both new and existing clusters)
+      - name: Update kubeconfig for EKS
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo "Setting up kubeconfig for EKS cluster..."
+          aws eks update-kubeconfig --region ${{ secrets.TF_REGION }} --name dev-finance-eks-cluster
+          kubectl get nodes
+          kubectl cluster-info
+
+          # Verify the kubeconfig file exists and is readable
+          ls -la ~/.kube/config
+          kubectl config current-context
+
+          # Set KUBE_CONFIG_PATH for subsequent terraform operations
+          echo "KUBE_CONFIG_PATH=$HOME/.kube/config" >> $GITHUB_ENV
+
+      - name: Terraform Apply Kubernetes Components (Phase 2)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        env:
+          KUBE_CONFIG_PATH: ~/.kube/config
+        run: |
+          echo "🚀 Phase 2: Applying ALL components (including Kubernetes resources)..."
+
+          echo "🔍 DEBUG: Using tfvars file: $TFVARS_FILE"
+
+          # Phase 2: Full apply - now that EKS is ready, apply everything
+          # This will create/update k8s resources without destroying them
+          echo "📊 Deploying all components including Kubernetes resources..."
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "✅ Using -var-file=$TFVARS_FILE"
+            # Full apply with all resources enabled
+            terraform apply -auto-approve -var-file="$TFVARS_FILE"
+          else
+            echo "❌ ERROR: No valid tfvars file - using defaults!"
+            echo "⚠️ WARNING: Jenkins will NOT be deployed!"
+            terraform apply -auto-approve
+          fi
+
+          echo "✅ Phase 2 complete - all components deployed"
+
+      - name: Deployment Summary
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════════════════════════"
+          echo "🎉 DEPLOYMENT COMPLETE"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "📊 Terraform Outputs:"
+          terraform output 2>/dev/null || echo "No outputs available"
+          echo ""
+          echo "🔗 Access URLs:"
+
+          # Get ALB endpoints
+          echo ""
+          echo "📋 Ingress Endpoints:"
+          kubectl get ingress -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,ADDRESS:.status.loadBalancer.ingress[0].hostname' 2>/dev/null || echo "No ingresses found"
+
+          echo ""
+          echo "📋 Kubernetes Nodes:"
+          kubectl get nodes -o wide 2>/dev/null || echo "Nodes not accessible"
+
+          echo ""
+          echo "📋 Running Pods (by namespace):"
+          kubectl get pods -A --field-selector=status.phase=Running --no-headers 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -rn || echo "Pods not accessible"
+
+          echo ""
+          echo "════════════════════════════════════════════════════════════════"
+          echo "✅ Deployment Mode: $TFVARS_FILE"
+          echo "════════════════════════════════════════════════════════════════"
+        continue-on-error: true
+
+      # Update Django configuration with actual RDS endpoint (only if RDS is enabled)
+      - name: Update Django Values with RDS Endpoint
+        id: update_django_config
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          echo "🔄 Checking if RDS is enabled and updating Django values.yaml..."
+
+          # Get RDS endpoint from Terraform output (hostname only, without port)
+          RDS_ENDPOINT=$(terraform output -raw rds_endpoint 2>/dev/null || echo "")
+          RDS_PORT=$(terraform output -raw rds_port 2>/dev/null || echo "5432")
+
+          # Remove port from endpoint if it's included
+          RDS_ENDPOINT=$(echo "$RDS_ENDPOINT" | sed 's/:.*$//')
+
+          if [ -z "$RDS_ENDPOINT" ] || [ "$RDS_ENDPOINT" = "null" ]; then
+            echo "ℹ️ RDS is not enabled or not deployed - skipping Django database configuration"
+            echo "📋 This is normal when using feature flags with RDS disabled"
+            echo "rds_endpoint=" >> $GITHUB_OUTPUT
+            echo "rds_port=" >> $GITHUB_OUTPUT
+            echo "rds_enabled=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "📊 RDS Endpoint: $RDS_ENDPOINT (hostname only)"
+          echo "📊 RDS Port: $RDS_PORT"
+          echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "rds_port=$RDS_PORT" >> $GITHUB_OUTPUT
+          echo "rds_enabled=true" >> $GITHUB_OUTPUT
+
+          # Update values.yaml file
+          VALUES_FILE="charts/django-app/values.yaml"
+
+          if [ -f "$VALUES_FILE" ]; then
+            echo "📝 Checking $VALUES_FILE..."
+
+            # Check if values are already correct (avoid unnecessary changes)
+            CURRENT_HOST=$(grep "POSTGRES_HOST:" "$VALUES_FILE" | head -1 | awk '{print $2}')
+
+            if [ "$CURRENT_HOST" = "$RDS_ENDPOINT" ]; then
+              echo "✅ values.yaml already has correct RDS endpoint: $RDS_ENDPOINT"
+              echo "ℹ️ No changes needed"
+            else
+              echo "📝 Updating $VALUES_FILE..."
+              echo "   Current: $CURRENT_HOST"
+              echo "   New: $RDS_ENDPOINT"
+
+              # Update database configuration to match Terraform/RDS setup
+              sed -i "s|POSTGRES_HOST:.*|POSTGRES_HOST: $RDS_ENDPOINT|g" "$VALUES_FILE"
+              sed -i "s|POSTGRES_PORT:.*|POSTGRES_PORT: $RDS_PORT|g" "$VALUES_FILE"
+              sed -i "s|POSTGRES_DB:.*|POSTGRES_DB: financedb|g" "$VALUES_FILE"
+              sed -i "s|POSTGRES_USER:.*|POSTGRES_USER: postgres|g" "$VALUES_FILE"
+
+              echo "✅ Updated Django configuration"
+            fi
+          else
+            echo "❌ Values file not found: $VALUES_FILE"
+          fi
+
+      - name: Commit Updated Configuration
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          # Only check for changes if RDS is enabled
+          if [[ "${{ steps.update_django_config.outputs.rds_enabled }}" == "true" ]]; then
+            # Check if there are changes to commit
+            if git diff --quiet charts/django-app/values.yaml; then
+              echo "ℹ️ No changes to commit - values.yaml is already up to date"
+              echo "changes_made=false" >> $GITHUB_ENV
+            else
+              echo "📝 Changes detected in Django configuration"
+              echo "changes_made=true" >> $GITHUB_ENV
+            fi
+          else
+            echo "ℹ️ RDS disabled - skipping configuration update check"
+            echo "changes_made=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create Pull Request for Configuration Update
+        if: env.changes_made == 'true' && steps.update_django_config.outputs.rds_enabled == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.TF_GITHUB_PAT }}
+          commit-message: |
+            🚀 Auto-update Django database configuration with RDS endpoint
+
+            - POSTGRES_HOST: ${{ steps.update_django_config.outputs.rds_endpoint }}
+            - POSTGRES_DB: financedb
+            - POSTGRES_USER: postgres
+
+            Auto-generated from Terraform infrastructure deployment
+          title: '🚀 Update Django Database Configuration with RDS Endpoint'
+          body: |
+            ## 🚀 Automatic Database Configuration Update
+
+            This PR automatically updates the Django application's database configuration with the actual RDS endpoint from the infrastructure deployment.
+
+            ### Changes Made:
+            - **POSTGRES_HOST**: Updated with actual RDS endpoint
+            - **POSTGRES_DB**: `financedb`
+            - **POSTGRES_USER**: `postgres`
+            - **POSTGRES_PASSWORD**: Updated with secret reference
+
+            ### Why This Change:
+            - Ensures Django app connects to the correct RDS instance
+            - Maintains consistency between infrastructure and application configuration
+            - Automated update reduces manual configuration errors
+
+            ### Files Modified:
+            - `charts/django-app/values.yaml`
+
+            ---
+            *This PR was automatically created after successful Terraform deployment.*
+
+            **Review and merge this PR to apply the database configuration changes.**
+          branch: auto-update-django-db-config
+          delete-branch: true
+          draft: false
+          labels: |
+            automated
+            database
+            configuration
+            infrastructure
+            terraform
+
+      # Destroy workflow (manual only)
+      - name: Update kubeconfig for EKS (Destroy)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "Attempting to connect to EKS cluster for cleanup..."
+          if aws eks update-kubeconfig --region ${{ secrets.TF_REGION }} --name dev-finance-eks-cluster; then
+            echo "Successfully connected to EKS cluster"
+            kubectl get nodes
+            # Set KUBE_CONFIG_PATH for terraform destroy operations
+            echo "KUBE_CONFIG_PATH=$HOME/.kube/config" >> $GITHUB_ENV
+          else
+            echo "Failed to connect to EKS cluster - it may already be deleted"
+            # Even if cluster is unreachable, try to set kubeconfig path for terraform
+            echo "KUBE_CONFIG_PATH=$HOME/.kube/config" >> $GITHUB_ENV
+          fi
+        continue-on-error: true
+
+      - name: Pre-Destroy Cleanup - Delete Ingresses and Services
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "🧹 Pre-Destroy Cleanup: Deleting Ingresses and LoadBalancer Services..."
+          echo "ℹ️  This allows ALB Controller to properly clean up ALBs and Security Groups"
+
+          if kubectl cluster-info &>/dev/null; then
+            echo "✅ Cluster is accessible - performing cleanup"
+
+            # Show current state
+            echo ""
+            echo "📋 Current Ingress resources:"
+            kubectl get ingress -A || echo "No ingresses found"
+
+            echo ""
+            echo "📋 Current LoadBalancer Services:"
+            kubectl get services -A --field-selector spec.type=LoadBalancer || echo "No LoadBalancer services found"
+
+            # Delete ALL Ingresses in ALL namespaces
+            # This triggers ALB Controller to delete ALBs and their Security Groups
+            echo ""
+            echo "🗑️ Deleting ALL Ingress resources..."
+            kubectl delete ingress --all-namespaces --all --timeout=120s 2>/dev/null || true
+
+            # Also delete LoadBalancer type services (they create NLBs/CLBs)
+            echo ""
+            echo "🗑️ Deleting LoadBalancer Services..."
+            for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+              kubectl get svc -n "$ns" --field-selector spec.type=LoadBalancer -o name 2>/dev/null | while read svc; do
+                if [ -n "$svc" ]; then
+                  echo "  Deleting $svc in namespace $ns"
+                  kubectl delete "$svc" -n "$ns" --timeout=60s 2>/dev/null || true
+                fi
+              done
+            done
+
+            # Remove finalizers from ArgoCD Applications to prevent stuck deletions
+            echo ""
+            echo "🔧 Removing finalizers from ArgoCD Applications..."
+            kubectl get applications -n argocd -o name 2>/dev/null | while read app; do
+              if [ -n "$app" ]; then
+                echo "  Patching $app"
+                kubectl patch "$app" -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+              fi
+            done
+
+            kubectl get applicationsets -n argocd -o name 2>/dev/null | while read appset; do
+              if [ -n "$appset" ]; then
+                echo "  Patching $appset"
+                kubectl patch "$appset" -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+              fi
+            done
+
+            # Wait for ALB Controller to process deletions and clean up AWS resources
+            echo ""
+            echo "⏳ Waiting 120s for ALB Controller to delete Load Balancers and Security Groups..."
+            sleep 120
+
+            # Verify cleanup
+            echo ""
+            echo "🔍 Verification - remaining resources:"
+            echo "  Ingresses:"
+            kubectl get ingress -A --no-headers 2>/dev/null | wc -l || echo "0"
+            echo "  LoadBalancer Services:"
+            kubectl get svc -A --field-selector spec.type=LoadBalancer --no-headers 2>/dev/null | wc -l || echo "0"
+
+            echo ""
+            echo "✅ Pre-destroy cleanup completed - ALB Controller should have cleaned up AWS resources"
+          else
+            echo "⚠️ Cluster not accessible - skipping Kubernetes cleanup"
+            echo "ℹ️ AWS resources will be cleaned up by subsequent cleanup steps"
+          fi
+        continue-on-error: true
+
+      - name: Terraform Format Check (Destroy)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          terraform fmt -check || {
+            echo "Terraform files need formatting. Auto-formatting..."
+            terraform fmt
+            echo "Files have been formatted."
+          }
+
+      - name: Terraform Plan (Destroy)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          if [[ -f "$TFVARS_FILE" ]]; then
+            echo "📋 Using configuration file for destroy: $TFVARS_FILE"
+            terraform plan -destroy -var-file="$TFVARS_FILE" -out=destroy-plan
+          else
+            echo "📋 Using default configuration for destroy"
+            terraform plan -destroy -out=destroy-plan
+          fi
+
+      - name: Terraform Destroy Kubernetes Components (Phase 1)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          # Destroy Kubernetes components first to ensure clean uninstall
+          if [[ -f "$TFVARS_FILE" ]]; then
+            terraform destroy -auto-approve -var-file="$TFVARS_FILE" \
+              -target=module.aws_load_balancer_controller \
+              -target=module.jenkins \
+              -target=module.argo_cd \
+              -target=module.monitoring \
+              -target=kubernetes_storage_class_v1.ebs_sc || echo "Some Kubernetes components may have already been destroyed"
+          else
+            terraform destroy -auto-approve \
+              -target=module.aws_load_balancer_controller \
+              -target=module.jenkins \
+              -target=module.argo_cd \
+              -target=module.monitoring \
+              -target=kubernetes_storage_class_v1.ebs_sc || echo "Some Kubernetes components may have already been destroyed"
+          fi
+        continue-on-error: true
+
+      - name: Force Cleanup Orphaned AWS Load Balancers
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "🧹 Force cleanup of orphaned AWS Load Balancers..."
+
+          # Get VPC ID from Terraform output (if still available)
+          VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+            echo "🔍 Found VPC ID: $VPC_ID"
+            echo "🔍 Searching for Load Balancers in VPC..."
+
+            # Find all Network Load Balancers in the VPC that match Kubernetes naming pattern
+            aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?VpcId=='$VPC_ID' && starts_with(LoadBalancerName, 'k8s-')].LoadBalancerArn" \
+              --output text | tr '\t' '\n' | while read -r lb_arn; do
+
+              if [ -n "$lb_arn" ] && [ "$lb_arn" != "None" ]; then
+                echo "🗑️ Deleting orphaned Load Balancer: $lb_arn"
+                aws elbv2 delete-load-balancer --load-balancer-arn "$lb_arn" || echo "Failed to delete $lb_arn"
+              fi
+            done
+
+            # Also check for Classic Load Balancers (just in case)
+            aws elb describe-load-balancers \
+              --query "LoadBalancerDescriptions[?VPCId=='$VPC_ID' && starts_with(LoadBalancerName, 'k8s-')].LoadBalancerName" \
+              --output text | tr '\t' '\n' | while read -r lb_name; do
+
+              if [ -n "$lb_name" ] && [ "$lb_name" != "None" ]; then
+                echo "🗑️ Deleting orphaned Classic Load Balancer: $lb_name"
+                aws elb delete-load-balancer --load-balancer-name "$lb_name" || echo "Failed to delete $lb_name"
+              fi
+            done
+
+            echo "⏳ Waiting 2 minutes for Load Balancer deletion to propagate..."
+            sleep 120
+
+            # Verify cleanup
+            echo "🔍 Checking for remaining Load Balancers..."
+            REMAINING_NLB=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC_ID' && starts_with(LoadBalancerName, 'k8s-')].LoadBalancerName" --output text)
+            REMAINING_CLB=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?VPCId=='$VPC_ID' && starts_with(LoadBalancerName, 'k8s-')].LoadBalancerName" --output text)
+
+            if [ -n "$REMAINING_NLB" ] && [ "$REMAINING_NLB" != "None" ]; then
+              echo "⚠️ Remaining Network Load Balancers: $REMAINING_NLB"
+            fi
+
+            if [ -n "$REMAINING_CLB" ] && [ "$REMAINING_CLB" != "None" ]; then
+              echo "⚠️ Remaining Classic Load Balancers: $REMAINING_CLB"
+            fi
+
+            if [ -z "$REMAINING_NLB$REMAINING_CLB" ] || [ "$REMAINING_NLB$REMAINING_CLB" = "NoneNone" ]; then
+              echo "✅ All Kubernetes Load Balancers have been cleaned up"
+            fi
+          else
+            echo "⚠️ Could not determine VPC ID, attempting broad cleanup..."
+
+            # Fallback: Search for all Load Balancers with k8s- prefix
+            echo "🔍 Searching for all Kubernetes Load Balancers..."
+            aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?starts_with(LoadBalancerName, 'k8s-')].LoadBalancerArn" \
+              --output text | tr '\t' '\n' | while read -r lb_arn; do
+
+              if [ -n "$lb_arn" ] && [ "$lb_arn" != "None" ]; then
+                echo "🗑️ Deleting Load Balancer: $lb_arn"
+                aws elbv2 delete-load-balancer --load-balancer-arn "$lb_arn" || echo "Failed to delete $lb_arn"
+              fi
+            done
+
+            sleep 60
+          fi
+
+          echo "✅ Load Balancer cleanup completed"
+        continue-on-error: true
+
+      - name: Force Cleanup All VPC Security Groups
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "🧹 Cleaning up ALL Security Groups in VPC..."
+
+          # Get VPC ID from Terraform output (if still available)
+          VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+
+          if [ -n "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+            echo "🔍 Found VPC ID: $VPC_ID"
+
+            # List ALL security groups in the VPC (excluding default)
+            echo "🔍 Finding ALL Security Groups in VPC..."
+            ALL_SECURITY_GROUPS=$(aws ec2 describe-security-groups \
+              --filters "Name=vpc-id,Values=$VPC_ID" \
+              --query "SecurityGroups[?GroupName!='default'].{GroupId:GroupId,GroupName:GroupName}" \
+              --output text)
+
+            if [ -n "$ALL_SECURITY_GROUPS" ]; then
+              echo "📋 Found Security Groups to delete:"
+              echo "$ALL_SECURITY_GROUPS"
+
+              # Clean up in multiple passes to handle dependencies
+              for attempt in 1 2 3; do
+                echo "🔄 Security Group cleanup attempt $attempt/3..."
+
+                # Get current list of all non-default security groups
+                aws ec2 describe-security-groups \
+                  --filters "Name=vpc-id,Values=$VPC_ID" \
+                  --query "SecurityGroups[?GroupName!='default'].GroupId" \
+                  --output text | tr '\t' '\n' | while read -r sg_id; do
+
+                  if [ -n "$sg_id" ] && [ "$sg_id" != "None" ]; then
+                    # Get the security group name for logging
+                    sg_name=$(aws ec2 describe-security-groups --group-ids "$sg_id" --query "SecurityGroups[0].GroupName" --output text 2>/dev/null || echo "unknown")
+
+                    echo "🗑️ Attempting to delete Security Group: $sg_id ($sg_name)"
+                    if aws ec2 delete-security-group --group-id "$sg_id" 2>/dev/null; then
+                      echo "✅ Successfully deleted $sg_id ($sg_name)"
+                    else
+                      echo "⚠️ Could not delete $sg_id ($sg_name) - removing rules first..."
+
+                      # Try to remove all rules first, then delete
+                      echo "🔧 Removing all ingress rules from $sg_id..."
+                      aws ec2 describe-security-groups --group-ids "$sg_id" \
+                        --query "SecurityGroups[0].IpPermissions" --output json 2>/dev/null | \
+                        jq -c '.[]?' 2>/dev/null | while read -r rule; do
+                        if [ -n "$rule" ] && [ "$rule" != "null" ]; then
+                          aws ec2 revoke-security-group-ingress --group-id "$sg_id" --ip-permissions "$rule" 2>/dev/null || true
+                        fi
+                      done
+
+                      echo "🔧 Removing all egress rules from $sg_id..."
+                      aws ec2 describe-security-groups --group-ids "$sg_id" \
+                        --query "SecurityGroups[0].IpPermissionsEgress" --output json 2>/dev/null | \
+                        jq -c '.[]?' 2>/dev/null | while read -r rule; do
+                        if [ -n "$rule" ] && [ "$rule" != "null" ] && [ "$rule" != "{}" ]; then
+                          aws ec2 revoke-security-group-egress --group-id "$sg_id" --ip-permissions "$rule" 2>/dev/null || true
+                        fi
+                      done
+
+                      # Try to delete again after removing rules
+                      echo "🗑️ Retrying deletion of $sg_id after rule removal..."
+                      if aws ec2 delete-security-group --group-id "$sg_id" 2>/dev/null; then
+                        echo "✅ Successfully deleted $sg_id after rule removal"
+                      else
+                        echo "❌ Still could not delete $sg_id (may have other dependencies)"
+                      fi
+                    fi
+                  fi
+                done
+
+                # Wait between attempts
+                if [ $attempt -lt 3 ]; then
+                  echo "⏳ Waiting 30 seconds before next attempt..."
+                  sleep 30
+                fi
+              done
+
+              # Final check - list any remaining non-default security groups
+              echo "🔍 Checking remaining Security Groups..."
+              REMAINING_SGs=$(aws ec2 describe-security-groups \
+                --filters "Name=vpc-id,Values=$VPC_ID" \
+                --query "SecurityGroups[?GroupName!='default'].GroupName" \
+                --output text 2>/dev/null || echo "")
+
+              if [ -n "$REMAINING_SGs" ] && [ "$REMAINING_SGs" != "None" ] && [ "$REMAINING_SGs" != "" ]; then
+                echo "⚠️ Remaining Security Groups: $REMAINING_SGs"
+                echo "ℹ️ These may need manual cleanup or have system dependencies"
+              else
+                echo "✅ All non-default Security Groups have been cleaned up"
+              fi
+            else
+              echo "ℹ️ No non-default Security Groups found in VPC"
+            fi
+
+            echo "✅ Security Group cleanup completed"
+          else
+            echo "⚠️ Could not determine VPC ID for Security Group cleanup"
+          fi
+        continue-on-error: true
+
+      - name: Log Groups and EBS Volumes - Cleanup
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "🧹 AWS Resource Cleanup: Log Groups and EBS Volumes..."
+
+          # ========== CloudWatch Log Groups Cleanup (Test Lab - ALL Log Groups) ==========
+          echo "📋 Cleaning up ALL CloudWatch Log Groups (Test Lab Account)..."
+
+          # Get ALL log groups in the region
+          echo "� Finding ALL CloudWatch Log Groups..."
+
+          ALL_LOG_GROUPS=$(aws logs describe-log-groups --query 'logGroups[].[logGroupName,storedBytes,retentionInDays]' --output text 2>/dev/null)
+
+          if [ -n "$ALL_LOG_GROUPS" ]; then
+            echo "� Found CloudWatch Log Groups to delete:"
+            echo "$ALL_LOG_GROUPS" | while IFS=$'\t' read -r log_group_name stored_bytes retention; do
+              if [ -n "$log_group_name" ] && [ "$log_group_name" != "None" ]; then
+                # Convert bytes to MB for readability
+                if [ -n "$stored_bytes" ] && [ "$stored_bytes" != "None" ] && [ "$stored_bytes" -gt 0 ]; then
+                  size_mb=$((stored_bytes / 1024 / 1024))
+                  retention_info="${retention:-Never expire}"
+                  echo "  📊 Log Group: $log_group_name | Size: ${size_mb}MB | Retention: $retention_info days"
+                else
+                  echo "  📊 Log Group: $log_group_name | Size: Empty | Retention: ${retention:-Never expire} days"
+                fi
+
+                echo "Deleting log group: $log_group_name"
+                if aws logs delete-log-group --log-group-name "$log_group_name" 2>/dev/null; then
+                  echo "    ✅ Successfully deleted $log_group_name"
+                else
+                  echo "    ❌ Failed to delete $log_group_name (may be protected or in use)"
+                fi
+              fi
+            done
+          else
+            echo "  ℹ️ No CloudWatch Log Groups found in the region"
+          fi
+
+          # ========== EBS Volumes Cleanup (Test Lab - All Available Volumes) ==========
+          echo "💾 Cleaning up ALL available EBS volumes (Test Lab Account)..."
+
+          # Get ALL available (unattached) EBS volumes in the region
+          echo "🔍 Finding ALL available EBS volumes..."
+
+          ALL_AVAILABLE_VOLUMES=$(aws ec2 describe-volumes \
+            --filters "Name=status,Values=available" \
+            --query 'Volumes[].[VolumeId,Size,VolumeType,CreateTime,Tags[?Key==`Name`]|[0].Value||`untagged`]' \
+            --output text 2>/dev/null)
+
+          if [ -n "$ALL_AVAILABLE_VOLUMES" ]; then
+            echo "📋 Found available EBS volumes to delete:"
+            echo "$ALL_AVAILABLE_VOLUMES" | while IFS=$'\t' read -r volume_id size vol_type create_time name_tag; do
+              if [ -n "$volume_id" ] && [ "$volume_id" != "None" ]; then
+                echo "  � Volume: $volume_id | Size: ${size}GB | Type: $vol_type | Name: $name_tag"
+                echo "  🗑️ Deleting EBS volume: $volume_id"
+                if aws ec2 delete-volume --volume-id "$volume_id" 2>/dev/null; then
+                  echo "    ✅ Successfully deleted $volume_id"
+                else
+                  echo "    ❌ Failed to delete $volume_id (may still be attached or protected)"
+                fi
+              fi
+            done
+          else
+            echo "  ℹ️ No available EBS volumes found in the region"
+          fi
+
+          # Also check for any volumes that might be stuck in "error" state
+          echo "� Checking for volumes in error state..."
+          ERROR_VOLUMES=$(aws ec2 describe-volumes \
+            --filters "Name=status,Values=error" \
+            --query 'Volumes[].VolumeId' --output text 2>/dev/null)
+
+          if [ -n "$ERROR_VOLUMES" ] && [ "$ERROR_VOLUMES" != "None" ]; then
+            echo "$ERROR_VOLUMES" | tr '\t' '\n' | while read -r volume_id; do
+              if [ -n "$volume_id" ]; then
+                echo "  🗑️ Deleting error state volume: $volume_id"
+                aws ec2 delete-volume --volume-id "$volume_id" || echo "    ❌ Failed to delete error volume $volume_id"
+              fi
+            done
+          else
+            echo "  ℹ️ No volumes in error state found"
+          fi
+
+          # Final verification
+          echo "🔍 Final verification..."
+          REMAINING_ALL_LOGS=$(aws logs describe-log-groups --query 'length(logGroups)' --output text 2>/dev/null || echo "0")
+          REMAINING_AVAILABLE_VOLUMES=$(aws ec2 describe-volumes --filters "Name=status,Values=available" --query 'length(Volumes)' --output text 2>/dev/null || echo "0")
+          REMAINING_ERROR_VOLUMES=$(aws ec2 describe-volumes --filters "Name=status,Values=error" --query 'length(Volumes)' --output text 2>/dev/null || echo "0")
+
+          echo "📊 Cleanup Summary:"
+          echo "  • Remaining CloudWatch Log Groups: $REMAINING_ALL_LOGS"
+          echo "  • Remaining available EBS volumes: $REMAINING_AVAILABLE_VOLUMES"
+          echo "  • Remaining error EBS volumes: $REMAINING_ERROR_VOLUMES"
+
+          TOTAL_REMAINING=$((REMAINING_ALL_LOGS + REMAINING_AVAILABLE_VOLUMES + REMAINING_ERROR_VOLUMES))
+
+          if [ "$TOTAL_REMAINING" -eq 0 ]; then
+            echo "✅ ALL Log Groups and EBS volumes have been cleaned up successfully"
+            echo "🧪 Test lab account is now completely clean!"
+          else
+            echo "⚠️ Some resources may still remain:"
+            if [ "$REMAINING_ALL_LOGS" -gt 0 ]; then
+              echo "  - $REMAINING_ALL_LOGS log groups (may be system/protected logs)"
+            fi
+            if [ "$REMAINING_AVAILABLE_VOLUMES" -gt 0 ]; then
+              echo "  - $REMAINING_AVAILABLE_VOLUMES available volumes (may be protected)"
+            fi
+            if [ "$REMAINING_ERROR_VOLUMES" -gt 0 ]; then
+              echo "  - $REMAINING_ERROR_VOLUMES error volumes (may need manual cleanup)"
+            fi
+          fi
+
+          echo "✅ AWS Resource cleanup completed"
+        continue-on-error: true
+
+      - name: Terraform Destroy Infrastructure (Phase 2)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          # Destroy remaining infrastructure using direct destroy command
+          echo "Destroying remaining infrastructure..."
+          if [[ -f "$TFVARS_FILE" ]]; then
+            terraform destroy -auto-approve -var-file="$TFVARS_FILE"
+          else
+            terraform destroy -auto-approve
+          fi
+
+      - name: Cloud Nuke - Final Cleanup ☢️
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          echo "☢️ Cloud Nuke - Cleaning up any remaining AWS resources..."
+
+          REGION="${{ secrets.TF_REGION }}"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          echo "🔍 Target Account: $ACCOUNT_ID"
+          echo "🔍 Target Region: $REGION"
+
+          # Download cloud-nuke
+          echo "📥 Downloading cloud-nuke..."
+          CLOUD_NUKE_VERSION="v0.37.1"
+          curl -sLo cloud-nuke "https://github.com/gruntwork-io/cloud-nuke/releases/download/${CLOUD_NUKE_VERSION}/cloud-nuke_linux_amd64"
+          chmod +x cloud-nuke
+
+          echo "✅ cloud-nuke downloaded successfully"
+          ./cloud-nuke --version
+
+          # Run cloud-nuke with exclusions to protect IAM and Terraform state
+          echo ""
+          echo "☢️ Starting cloud-nuke cleanup..."
+          echo "⚠️ Excluding: IAM resources, S3 (Terraform state bucket)"
+          echo ""
+
+          # Nuke all resources except IAM (to avoid locking out) and S3 (Terraform state)
+          ./cloud-nuke aws \
+            --region "$REGION" \
+            --force \
+            --older-than 0h \
+            --exclude-resource-type iam \
+            --exclude-resource-type iam-role \
+            --exclude-resource-type iam-policy \
+            --exclude-resource-type iam-group \
+            --exclude-resource-type iam-user \
+            --exclude-resource-type iam-service-linked-role \
+            --exclude-resource-type s3 \
+            --exclude-resource-type config-recorders \
+            --exclude-resource-type config-rules \
+            || echo "⚠️ Some resources may have failed to delete (this is normal for protected resources)"
+
+          echo ""
+          echo "🔍 Final verification - checking remaining resources..."
+
+          # Quick verification of common resources
+          echo "📊 Remaining resource summary:"
+
+          REMAINING_VPCS=$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs[?IsDefault==`false`])' --output text 2>/dev/null || echo "0")
+          REMAINING_EKS=$(aws eks list-clusters --region "$REGION" --query 'length(clusters)' --output text 2>/dev/null || echo "0")
+          REMAINING_RDS=$(aws rds describe-db-instances --region "$REGION" --query 'length(DBInstances)' --output text 2>/dev/null || echo "0")
+          REMAINING_ALB=$(aws elbv2 describe-load-balancers --region "$REGION" --query 'length(LoadBalancers)' --output text 2>/dev/null || echo "0")
+          REMAINING_EC2=$(aws ec2 describe-instances --region "$REGION" --query 'length(Reservations[].Instances[?State.Name!=`terminated`])' --output text 2>/dev/null || echo "0")
+
+          echo "  • Non-default VPCs: $REMAINING_VPCS"
+          echo "  • EKS Clusters: $REMAINING_EKS"
+          echo "  • RDS Instances: $REMAINING_RDS"
+          echo "  • Load Balancers: $REMAINING_ALB"
+          echo "  • EC2 Instances: $REMAINING_EC2"
+
+          TOTAL=$((REMAINING_VPCS + REMAINING_EKS + REMAINING_RDS + REMAINING_ALB + REMAINING_EC2))
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo ""
+            echo "🎉 =============================================="
+            echo "🎉 SUCCESS: AWS account is clean!"
+            echo "🎉 Ready for next deployment"
+            echo "🎉 =============================================="
+          else
+            echo ""
+            echo "⚠️ Some resources remain (may be protected or in deletion)"
+            echo "⚠️ Manual review recommended if this persists"
+          fi
+
+          echo ""
+          echo "☢️ Cloud Nuke cleanup completed"
+        continue-on-error: true

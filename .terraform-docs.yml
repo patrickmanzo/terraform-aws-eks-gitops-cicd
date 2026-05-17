@@ -1,0 +1,36 @@
+formatter: markdown table
+
+sections:
+  show:
+    - requirements
+    - providers
+    - inputs
+    - outputs
+
+content: |
+  {{ .Header }}
+
+  ## Usage
+
+  {{ .Content }}
+
+  {{ .Inputs }}
+
+  {{ .Outputs }}
+
+output:
+  file: README.md
+  mode: inject
+  template: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->
+
+settings:
+  anchor: true
+  color: true
+  escape: true
+  indent: 2
+  required: true
+  sensitive: true
+  type: true

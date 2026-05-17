@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ .Release.Name }}-cleanup"
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    # This is a pre-delete hook that runs before the release is deleted
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: "{{ .Release.Name }}-cleanup"
+      labels:
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: argocd-server
+      containers:
+      - name: ingress-finalizer-cleanup
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "🧹 Cleaning up ingress finalizers to speed up deletion..."
+
+          # Remove finalizers from all ingresses managed by ArgoCD applications
+          kubectl get ingress --all-namespaces -o json | \
+          jq -r '.items[] | select(.metadata.finalizers != null) | "\(.metadata.namespace) \(.metadata.name)"' | \
+          while read namespace ingress; do
+            if [ -n "$ingress" ] && [ "$ingress" != "null" ]; then
+              echo "Removing finalizers from ingress: $namespace/$ingress"
+              kubectl patch ingress "$ingress" -n "$namespace" \
+                -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+            fi
+          done
+
+          echo "✅ Ingress finalizer cleanup completed"

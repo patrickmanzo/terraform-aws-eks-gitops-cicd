@@ -1,0 +1,12 @@
+region = "us-east-1"
+
+github_repo_url = "https://github.com/<github_username>/<project_name>.git"
+github_branch = "main"
+github_user = "github_username"
+github_pat = "github_token"
+
+rds_password = "password_for_rds_db"
+rds_publicly_accessible = true
+rds_use_aurora = true
+rds_multi_az = false
+rds_backup_retention_period = "0"

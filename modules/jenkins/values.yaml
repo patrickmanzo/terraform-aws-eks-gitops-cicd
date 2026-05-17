@@ -1,0 +1,144 @@
+ controller:
+  admin:
+    username: admin
+    password: admin123
+
+  serviceType: ClusterIP
+  servicePort: 80
+  service:
+    port: 80
+    targetPort: 8080
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/backend-protocol: HTTP
+      alb.ingress.kubernetes.io/group.name: "jenkins"
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+      alb.ingress.kubernetes.io/healthcheck-path: /login
+      alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+      alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+      alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+      alb.ingress.kubernetes.io/inbound-cidrs: 0.0.0.0/0
+      alb.ingress.kubernetes.io/load-balancer-attributes: deletion_protection.enabled=false
+    hostName: ""
+    tls: false
+
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+
+  persistentVolume:
+    enabled: true
+    storageClass: "ebs-sc"
+    size: "10Gi"
+
+  installPlugins:
+    - kubernetes:latest
+    - workflow-aggregator:latest
+    - git:latest
+    - configuration-as-code:latest
+    - credentials-binding:latest
+    - github:latest
+    - docker-plugin:latest
+    - docker-workflow:latest
+    - job-dsl:latest
+
+  serviceAccount:
+    name: jenkins-sa
+    create: false
+
+  JCasC:
+    configScripts:
+      credentials: |
+        credentials:
+          system:
+            domainCredentials:
+              - credentials:
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: github-token
+                      username: ${github_user}
+                      password: ${github_pat}
+                      description: GitHub PAT
+
+      global-env: |
+        jenkins:
+          globalNodeProperties:
+            - envVars:
+                env:
+                  - key: "ECR_REGISTRY"
+                    value: "${ecr_registry_endpoint}"
+                  - key: "ECR_REPOSITORY_NAME"
+                    value: "${ecr_repository_name}"
+                  - key: "ECR_REPOSITORY_URL"
+                    value: "${ecr_repository_url}"
+                  - key: "GITHUB_REPO_URL"
+                    value: "${github_repo_url}"
+
+      seed-job: |
+        jobs:
+          - script: >
+              job('seed-job') {
+                description('Job to generate pipeline for Django project')
+                scm {
+                  git {
+                    remote {
+                      url('${github_repo_url}')
+                      credentials('github-token')
+                      refspec('+refs/heads/*:refs/remotes/origin/*')
+                    }
+                    branches('main')
+                  }
+                }
+                steps {
+                  dsl {
+                    text('''
+                      pipelineJob("goit-django-docker") {
+                        parameters {
+                          stringParam('ECR_REGISTRY', '${ecr_registry_endpoint}', 'ECR Registry Endpoint')
+                          stringParam('ECR_REPOSITORY_NAME', '${ecr_repository_name}', 'ECR Repository Name')
+                          stringParam('GITHUB_REPO_URL', '${github_repo_url}', 'GitHub Repository URL')
+                        }
+                        definition {
+                          cpsScm {
+                            scm {
+                              git {
+                                remote {
+                                  url('${github_repo_url}')
+                                  credentials('github-token')
+                                  refspec('+refs/heads/*:refs/remotes/origin/*')
+                                }
+                                branches('main')
+                              }
+                            }
+                            scriptPath("django/Jenkinsfile")
+                          }
+                        }
+                      }
+                    ''')
+                  }
+                }
+              }
+
+      security: |
+        security:
+          scriptApproval:
+            approvedSignatures:
+              - "method groovy.lang.GroovyObject invokeMethod java.lang.String java.lang.Object"
+              - "new java.lang.String byte[]"
+              - "staticMethod org.codehaus.groovy.runtime.DefaultGroovyMethods getText java.io.File"
+              - "staticMethod org.codehaus.groovy.runtime.DefaultGroovyMethods readLines java.io.File"
+              - "method java.io.File getText"
+              - "method java.lang.String replace java.lang.CharSequence java.lang.CharSequence"
+              - "method java.lang.String replaceAll java.lang.String java.lang.String"
+              - "method java.lang.String split java.lang.String"
+              - "staticMethod java.lang.System getenv java.lang.String"

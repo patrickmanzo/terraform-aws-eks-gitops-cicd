@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Values.namespace | default "django" }}
+  labels:
+    app: {{ .Release.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: {{ .Chart.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: {{ .Chart.Name }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.secrets }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.port }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      imagePullSecrets:
+        {{- if .Values.image.pullSecrets }}
+        {{- toYaml .Values.image.pullSecrets | nindent 8 }}
+        {{- end }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.service.port }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        {{- if .Values.secrets }}
+        - secretRef:
+            name: {{ .Release.Name }}-secret
+        {{- end }}
+        {{- if .Values.healthCheck.enabled }}
+        startupProbe:
+          httpGet:
+            path: {{ .Values.healthCheck.startup.path }}
+            port: {{ .Values.healthCheck.startup.port }}
+          initialDelaySeconds: {{ .Values.healthCheck.startup.initialDelaySeconds }}
+          periodSeconds: {{ .Values.healthCheck.startup.periodSeconds }}
+          timeoutSeconds: {{ .Values.healthCheck.startup.timeoutSeconds }}
+          failureThreshold: {{ .Values.healthCheck.startup.failureThreshold }}
+          successThreshold: {{ .Values.healthCheck.startup.successThreshold }}
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.healthCheck.liveness.path }}
+            port: {{ .Values.healthCheck.liveness.port }}
+          initialDelaySeconds: {{ .Values.healthCheck.liveness.initialDelaySeconds }}
+          periodSeconds: {{ .Values.healthCheck.liveness.periodSeconds }}
+          timeoutSeconds: {{ .Values.healthCheck.liveness.timeoutSeconds }}
+          failureThreshold: {{ .Values.healthCheck.liveness.failureThreshold }}
+          successThreshold: {{ .Values.healthCheck.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.healthCheck.readiness.path }}
+            port: {{ .Values.healthCheck.readiness.port }}
+          initialDelaySeconds: {{ .Values.healthCheck.readiness.initialDelaySeconds }}
+          periodSeconds: {{ .Values.healthCheck.readiness.periodSeconds }}
+          timeoutSeconds: {{ .Values.healthCheck.readiness.timeoutSeconds }}
+          failureThreshold: {{ .Values.healthCheck.readiness.failureThreshold }}
+          successThreshold: {{ .Values.healthCheck.readiness.successThreshold }}
+        {{- end }}
+        {{- if .Values.resources }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        {{- end }}

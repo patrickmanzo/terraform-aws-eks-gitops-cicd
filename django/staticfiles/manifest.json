@@ -1,0 +1,28 @@
+{
+    "name": "Django Application",
+    "short_name": "Django App",
+    "description": "Django Application - Production Ready Container Platform",
+    "theme_color": "#667eea",
+    "background_color": "#ffffff",
+    "display": "standalone",
+    "orientation": "portrait",
+    "scope": "/",
+    "start_url": "/",
+    "icons": [
+        {
+            "src": "/static/images/favicon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml"
+        },
+        {
+            "src": "/static/favicon.ico",
+            "sizes": "16x16",
+            "type": "image/x-icon"
+        },
+        {
+            "src": "/static/images/apple-touch-icon.svg",
+            "sizes": "180x180",
+            "type": "image/svg+xml"
+        }
+    ]
+}

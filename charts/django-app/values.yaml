@@ -1,0 +1,103 @@
+namespace: django
+
+image:
+  repository: 343104031682.dkr.ecr.us-east-1.amazonaws.com/finance-app
+  tag: v1.0.0
+  pullPolicy: Always
+  pullSecrets:
+    - name: ecr-creds
+
+# Number of replicas - 2 is good for HA, increase for more traffic
+replicas: 2
+
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+
+ingress:
+  enabled: true
+  className: alb
+  host: ""  # Empty = access via ALB URL directly. Set to your domain for production.
+  tls: false
+
+# Environment variables - these go into the ConfigMap automatically
+config:
+  # Django settings
+  DJANGO_SETTINGS_MODULE: myproject.settings_production
+  DEBUG: "False"
+  DJANGO_LOG_LEVEL: INFO
+  SECRET_KEY: "change-this-in-production-use-k8s-secret"
+
+  # Database connection
+  POSTGRES_HOST: finance-app-db.curigqy8qkpj.us-east-1.rds.amazonaws.com
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: financedb
+  POSTGRES_USER: postgres
+  # NOTE: Move password to Secret (see secret.yaml)
+
+  # Application settings
+  DJANGO_ENV: production
+
+# Sensitive data - stored as Kubernetes Secret (base64 encoded automatically)
+secrets:
+  POSTGRES_PASSWORD: pass12345
+  SECRET_KEY: django-insecure-change-this-in-production-use-strong-key
+
+postgresql:
+  enabled: false
+  global:
+    postgresql:
+      auth:
+        postgresPassword: pass12345
+        username: django_user
+        database: django_db
+        password: pass12345
+  primary:
+    persistence:
+      size: 2Gi
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 100Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  scaleUpStabilization: 60
+  scaleDownStabilization: 300
+
+# Health check configuration
+healthCheck:
+  enabled: true
+  startup:
+    path: "/health/"  # Fixed: added trailing slash
+    port: 8000
+    initialDelaySeconds: 30  # Increased: Django needs time to start
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30  # Allows up to 5 minutes for startup (30 * 10s)
+    successThreshold: 1
+  liveness:
+    path: "/alive/"  # Fixed: added trailing slash
+    port: 8000
+    initialDelaySeconds: 60  # Wait for startup probe to pass first
+    periodSeconds: 30  # Check every 30 seconds
+    timeoutSeconds: 5
+    failureThreshold: 3  # Restart after 3 failures (90 seconds)
+    successThreshold: 1
+  readiness:
+    path: "/ready/"  # Fixed: added trailing slash
+    port: 8000
+    initialDelaySeconds: 10  # Start checking quickly
+    periodSeconds: 10  # Check frequently
+    timeoutSeconds: 5
+    failureThreshold: 3  # Mark unhealthy after 3 failures (30 seconds)
+    successThreshold: 1
