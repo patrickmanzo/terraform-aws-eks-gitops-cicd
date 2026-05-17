@@ -2,7 +2,7 @@ namespace: django
 
 image:
   repository: 343104031682.dkr.ecr.us-east-1.amazonaws.com/finance-app
-  tag: v1.0.0
+  tag: v1.0.1
   pullPolicy: Always
   pullSecrets:
     - name: ecr-creds
